@@ -1,7 +1,5 @@
-
 streamlit
-ollama
+groq
 faiss-cpu
 sentence-transformers
 numpy
-torchvision

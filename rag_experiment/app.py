@@ -1,31 +1,27 @@
 
 import streamlit as st
-import ollama
 import faiss
 import numpy as np
+from groq import Groq
 from sentence_transformers import SentenceTransformer
 
 st.set_page_config(
-    page_title="Company Policy AI Assistant",
+    page_title="RAG vs LLM | Policy Assistant",
     page_icon="📄",
     layout="wide"
 )
 
 st.title("📄 Company Policy AI Assistant")
-st.write(
-    "Explore the policy and compare answers "
-    "with and without Retrieval-Augmented Generation."
-)
+st.caption("Compare an LLM's direct answer with retrieval-grounded answers.")
 
-# Load policy
+# Load the demonstration policy
 with open("company_policy.txt", "r", encoding="utf-8") as file:
     document = file.read()
 
-# Display the complete policy
+# Display the complete policy on the webpage
 with st.expander("📚 View Company Policy", expanded=True):
     st.markdown(document)
 
-# Prepare policy chunks
 chunks = [
     line.strip()
     for line in document.splitlines()
@@ -38,18 +34,44 @@ def prepare_rag():
         "sentence-transformers/all-MiniLM-L6-v2"
     )
 
-    embeddings = model.encode(
+    vectors = model.encode(
         chunks,
         normalize_embeddings=True
     )
-    embeddings = np.asarray(embeddings, dtype="float32")
+    vectors = np.asarray(vectors, dtype="float32")
 
-    db = faiss.IndexFlatIP(embeddings.shape[1])
-    db.add(embeddings)
+    db = faiss.IndexFlatIP(vectors.shape[1])
+    db.add(vectors)
 
     return model, db
 
-embedding_model, index = prepare_rag()
+@st.cache_resource
+def get_llm_client(api_key):
+    return Groq(api_key=api_key)
+
+def ask_llm(client, prompt):
+    result = client.chat.completions.create(
+        model="openai/gpt-oss-20b",
+        messages=[
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.2
+    )
+    return result.choices[0].message.content
+
+try:
+    api_key = st.secrets["GROQ_API_KEY"]
+except (KeyError, FileNotFoundError):
+    st.error(
+        "Groq API key is missing. Add GROQ_API_KEY "
+        "to Streamlit Secrets before asking questions."
+    )
+    st.stop()
+
+client = get_llm_client(api_key)
+
+with st.spinner("Loading the embedding model..."):
+    embedding_model, index = prepare_rag()
 
 question = st.text_input(
     "Ask a question about the company policy",
@@ -60,44 +82,52 @@ if st.button("Compare Answers", type="primary"):
     if not question.strip():
         st.warning("Please enter a question.")
     else:
-        # Without RAG
-        with st.spinner("Generating answers..."):
-            without_rag = ollama.chat(
-                model="llama3.2",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": (
-                            "Answer the question directly. "
-                            "You do not have access to the "
-                            "company policy document.\n\n"
-                            f"Question: {question}"
-                        )
-                    }
+        try:
+            with st.spinner("Generating both answers..."):
+
+                # WITHOUT RAG: no company policy context
+                direct_answer = ask_llm(
+                    client,
+                    f"""
+Answer the question directly.
+You have not been given the company's policy document.
+If you do not know the company-specific answer,
+say that you do not have enough information.
+
+Question: {question}
+"""
+                )
+
+                # WITH RAG: retrieve relevant policy statements
+                question_vector = embedding_model.encode(
+                    [question],
+                    normalize_embeddings=True
+                )
+                question_vector = np.asarray(
+                    question_vector,
+                    dtype="float32"
+                )
+
+                scores, indices = index.search(
+                    question_vector, k=min(2, len(chunks))
+                )
+
+                retrieved = [
+                    chunks[i]
+                    for i in indices[0]
+                    if i != -1
                 ]
-            )["message"]["content"]
 
-            # With RAG
-            q_embedding = embedding_model.encode(
-                [question],
-                normalize_embeddings=True
-            )
-            q_embedding = np.asarray(
-                q_embedding, dtype="float32"
-            )
+                context = "\n".join(retrieved)
 
-            scores, indices = index.search(q_embedding, k=2)
+                rag_answer = ask_llm(
+                    client,
+                    f"""
+Answer using only the company policy context below.
 
-            context = "\n".join(
-                chunks[i]
-                for i in indices[0]
-                if i != -1
-            )
-
-            prompt = f"""
-Answer using only the company policy context.
-If the answer is not specified, say:
+If the context does not contain the answer, say:
 "The provided policy does not specify this information."
+
 Do not invent company rules.
 
 Policy context:
@@ -105,24 +135,24 @@ Policy context:
 
 Question: {question}
 """
+                )
 
-            with_rag = ollama.chat(
-                model="llama3.2",
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
-            )["message"]["content"]
+            left, right = st.columns(2)
 
-        # Display comparison
-        col1, col2 = st.columns(2)
+            with left:
+                st.subheader("🔹 Without RAG")
+                st.write(direct_answer)
 
-        with col1:
-            st.subheader("🔹 Without RAG")
-            st.write(without_rag)
+            with right:
+                st.subheader("🔹 With RAG")
+                st.write(rag_answer)
 
-        with col2:
-            st.subheader("🔹 With RAG")
-            st.write(with_rag)
+                with st.expander("View retrieved policy statements"):
+                    st.write(context if context else "No statements retrieved.")
 
-            with st.expander("View retrieved policy statements"):
-                st.write(context)
+        except Exception as error:
+            st.error(
+                "The request failed. Check your API key, "
+                "model availability, network connection, and API limits."
+            )
+            st.caption(f"Error details: {error}")
