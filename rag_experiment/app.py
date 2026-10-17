@@ -15,7 +15,11 @@ st.title("📄 Company Policy AI Assistant")
 st.caption("Compare an LLM's direct answer with retrieval-grounded answers.")
 
 # Load the demonstration policy
-with open("company_policy.txt", "r", encoding="utf-8") as file:
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
+
+with open(BASE_DIR / "company_policy.txt", "r", encoding="utf-8") as file:
     document = file.read()
 
 # Display the complete policy on the webpage
